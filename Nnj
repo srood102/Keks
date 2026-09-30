@@ -1,0 +1,430 @@
+--// SMART HORROR MONSTER AI
+--// Put this Script inside the Monster model
+
+local Players = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Monster = script.Parent
+local Humanoid = Monster:WaitForChild("Humanoid")
+local Root = Monster:WaitForChild("HumanoidRootPart")
+
+----------------------------------------------------
+-- SETTINGS
+----------------------------------------------------
+
+local SETTINGS = {
+	WalkSpeed = 9,
+	ChaseSpeed = 18,
+
+	DetectionDistance = 70,
+	AttackDistance = 4,
+
+	Damage = 100,
+
+	PathRefreshRate = 0.5,
+	SearchTime = 8,
+
+	HearingDistance = 40,
+
+	WanderDistance = 50,
+
+	LoseTargetDistance = 110,
+
+	AttackCooldown = 2,
+}
+
+----------------------------------------------------
+-- VARIABLES
+----------------------------------------------------
+
+local currentTarget = nil
+local lastKnownPosition = nil
+local isChasing = false
+local canAttack = true
+
+local currentPath = nil
+local waypoints = {}
+local waypointIndex = 1
+
+Humanoid.WalkSpeed = SETTINGS.WalkSpeed
+
+----------------------------------------------------
+-- REMOTE EVENT
+----------------------------------------------------
+
+local jumpscareEvent = ReplicatedStorage:FindFirstChild("JumpscareEvent")
+
+if not jumpscareEvent then
+	jumpscareEvent = Instance.new("RemoteEvent")
+	jumpscareEvent.Name = "JumpscareEvent"
+	jumpscareEvent.Parent = ReplicatedStorage
+end
+
+----------------------------------------------------
+-- CHARACTER CHECK
+----------------------------------------------------
+
+local function getCharacterData(player)
+
+	if not player.Character then
+		return nil
+	end
+
+	local character = player.Character
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+
+	if not humanoid or not rootPart then
+		return nil
+	end
+
+	if humanoid.Health <= 0 then
+		return nil
+	end
+
+	return character, humanoid, rootPart
+end
+
+----------------------------------------------------
+-- LINE OF SIGHT
+----------------------------------------------------
+
+local function canSeePlayer(player)
+
+	local character, humanoid, playerRoot = getCharacterData(player)
+
+	if not character then
+		return false
+	end
+
+	local direction = playerRoot.Position - Root.Position
+
+	if direction.Magnitude > SETTINGS.DetectionDistance then
+		return false
+	end
+
+	local rayParams = RaycastParams.new()
+
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = {Monster}
+
+	local result = workspace:Raycast(
+		Root.Position,
+		direction,
+		rayParams
+	)
+
+	if result then
+
+		if result.Instance:IsDescendantOf(character) then
+			return true
+		end
+
+	end
+
+	return false
+end
+
+----------------------------------------------------
+-- FIND CLOSEST PLAYER
+----------------------------------------------------
+
+local function findBestTarget()
+
+	local bestPlayer = nil
+	local bestDistance = SETTINGS.DetectionDistance
+
+	for _, player in ipairs(Players:GetPlayers()) do
+
+		local character, humanoid, playerRoot = getCharacterData(player)
+
+		if character then
+
+			local distance = (
+				playerRoot.Position - Root.Position
+			).Magnitude
+
+			if distance < bestDistance then
+
+				if canSeePlayer(player) then
+
+					bestDistance = distance
+					bestPlayer = player
+
+				end
+			end
+		end
+	end
+
+	return bestPlayer
+end
+
+----------------------------------------------------
+-- PATH CREATION
+----------------------------------------------------
+
+local function createPath(destination)
+
+	local path = PathfindingService:CreatePath({
+
+		AgentRadius = 2,
+		AgentHeight = 5,
+
+		AgentCanJump = true,
+
+		AgentJumpHeight = 7,
+		AgentMaxSlope = 45,
+
+		WaypointSpacing = 3,
+	})
+
+	local success, errorMessage = pcall(function()
+
+		path:ComputeAsync(
+			Root.Position,
+			destination
+		)
+
+	end)
+
+	if not success then
+		warn("Path error:", errorMessage)
+		return false
+	end
+
+	if path.Status == Enum.PathStatus.Success then
+
+		currentPath = path
+		waypoints = path:GetWaypoints()
+		waypointIndex = 2
+
+		return true
+	end
+
+	return false
+end
+
+----------------------------------------------------
+-- FOLLOW PATH
+----------------------------------------------------
+
+local function followPath()
+
+	if not waypoints[waypointIndex] then
+		return false
+	end
+
+	local waypoint = waypoints[waypointIndex]
+
+	if waypoint.Action == Enum.PathWaypointAction.Jump then
+		Humanoid.Jump = true
+	end
+
+	Humanoid:MoveTo(waypoint.Position)
+
+	local distance = (
+		Root.Position - waypoint.Position
+	).Magnitude
+
+	if distance < 3 then
+		waypointIndex += 1
+	end
+
+	return true
+end
+
+----------------------------------------------------
+-- ATTACK
+----------------------------------------------------
+
+local function attackPlayer(player)
+
+	if not canAttack then
+		return
+	end
+
+	local character, humanoid, playerRoot = getCharacterData(player)
+
+	if not character then
+		return
+	end
+
+	local distance = (
+		playerRoot.Position - Root.Position
+	).Magnitude
+
+	if distance > SETTINGS.AttackDistance then
+		return
+	end
+
+	canAttack = false
+
+	------------------------------------------------
+	-- JUMPSCARE
+	------------------------------------------------
+
+	jumpscareEvent:FireClient(player)
+
+	task.wait(0.25)
+
+	if humanoid.Health > 0 then
+		humanoid:TakeDamage(SETTINGS.Damage)
+	end
+
+	task.delay(SETTINGS.AttackCooldown, function()
+		canAttack = true
+	end)
+end
+
+----------------------------------------------------
+-- WANDER
+----------------------------------------------------
+
+local function wander()
+
+	local randomX = math.random(
+		-SETTINGS.WanderDistance,
+		SETTINGS.WanderDistance
+	)
+
+	local randomZ = math.random(
+		-SETTINGS.WanderDistance,
+		SETTINGS.WanderDistance
+	)
+
+	local destination = Root.Position + Vector3.new(
+		randomX,
+		0,
+		randomZ
+	)
+
+	createPath(destination)
+
+	local startTime = os.clock()
+
+	while os.clock() - startTime < 5 do
+
+		if findBestTarget() then
+			return
+		end
+
+		followPath()
+
+		task.wait(0.1)
+	end
+end
+
+----------------------------------------------------
+-- CHASE PLAYER
+----------------------------------------------------
+
+local function chasePlayer(player)
+
+	local character, humanoid, playerRoot = getCharacterData(player)
+
+	if not character then
+		return
+	end
+
+	isChasing = true
+
+	Humanoid.WalkSpeed = SETTINGS.ChaseSpeed
+
+	local lastPathUpdate = 0
+
+	while player and player.Parent do
+
+		character, humanoid, playerRoot = getCharacterData(player)
+
+		if not character then
+			break
+		end
+
+		local distance = (
+			playerRoot.Position - Root.Position
+		).Magnitude
+
+		--------------------------------------------
+		-- ATTACK
+		--------------------------------------------
+
+		if distance <= SETTINGS.AttackDistance then
+			attackPlayer(player)
+		end
+
+		--------------------------------------------
+		-- LOSE PLAYER
+		--------------------------------------------
+
+		if distance > SETTINGS.LoseTargetDistance then
+			break
+		end
+
+		--------------------------------------------
+		-- REMEMBER PLAYER POSITION
+		--------------------------------------------
+
+		if canSeePlayer(player) then
+			lastKnownPosition = playerRoot.Position
+		end
+
+		--------------------------------------------
+		-- PATHFIND
+		--------------------------------------------
+
+		if os.clock() - lastPathUpdate >= SETTINGS.PathRefreshRate then
+
+			lastPathUpdate = os.clock()
+
+			if lastKnownPosition then
+				createPath(lastKnownPosition)
+			end
+		end
+
+		followPath()
+
+		task.wait(0.05)
+	end
+
+	isChasing = false
+
+	currentTarget = nil
+
+	Humanoid.WalkSpeed = SETTINGS.WalkSpeed
+end
+
+----------------------------------------------------
+-- MAIN AI LOOP
+----------------------------------------------------
+
+while Monster.Parent do
+
+	if not isChasing then
+
+		local target = findBestTarget()
+
+		if target then
+
+			currentTarget = target
+
+			local character, humanoid, playerRoot =
+				getCharacterData(target)
+
+			if playerRoot then
+				lastKnownPosition = playerRoot.Position
+			end
+
+			chasePlayer(target)
+
+		else
+
+			wander()
+
+		end
+	end
+
+	task.wait(0.2)
+end
